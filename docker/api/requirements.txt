@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+gunicorn
+asyncpg
+pydantic>=2
+prefect
+redis
+pytest
+uvloop
+pytest-asyncio
+httpx

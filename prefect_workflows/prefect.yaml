@@ -1,0 +1,121 @@
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /opt/prefect-app
+
+deployments:
+
+  # --- Initialization Flow ---
+
+  - name: db_initial
+    entrypoint: flows/db_maintain.py:initialize_db_flow
+    description: "Initializes the database with necessary tables and indexes"
+    work_pool:
+      name: NOAA-pool
+  
+  - name: events_location_init
+    entrypoint: flows/db_maintain.py:location_snapshot_flow
+    description: "Initializes the tables with necessary tables."
+    work_pool:
+      name: NOAA-pool
+
+  # --- Data Extraction Flows ---
+
+  - name: DRAP Extract
+    entrypoint: flows/drap_extract.py:rap_extract_flow
+    description: "Fetches live DRAP data from NOAA every minute"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "* * * * *"
+        timezone: UTC
+  
+  - name: Aurora Extract
+    entrypoint: flows/aurora_extract.py:aurora_extract_flow
+    description: "Fetches live aurora data from NOAA every minute"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "* * * * *"
+        timezone: UTC
+  
+  - name: Geoelectric Field Extract
+    entrypoint: flows/geomatic_extract.py:geomatic_extract_flow
+    description: "Fetches live geoelectric field data from NOAA every minute"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "* * * * *"
+        timezone: UTC
+
+  - name: Proton Flux Plot Extract
+    entrypoint: flows/proton_flux_plot.py:ingest_proton_flux_plot_flow
+    description: "Fetches live proton flux plot data from NOAA every 5 minutes"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "*/5 * * * *"
+        timezone: UTC
+
+  - name: Kp Index Extract
+    entrypoint: flows/kp_index.py:ingest_kp_index_flow
+    description: "Fetches live Kp index data from NOAA every hour"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "0 */1 * * *"
+        timezone: UTC
+
+  - name: Alert Extract
+    entrypoint: flows/alert.py:alerts_extract_flow
+    description: "Fetches live alerts data from NOAA every minute"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "* * * * *"
+        timezone: UTC
+
+  - name: X-ray Extract
+    entrypoint: flows/xray_extract.py:xray_extract_flow
+    description: "Fetches live X-ray-flares data from NOAA every minute"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "* * * * *"
+        timezone: UTC
+
+  - name: opensky-ingester
+    entrypoint: flows/flights_capture.py:ingest_flow
+    description: "Fetches live flight data from OpenSky API every minute"
+    work_pool:
+      name: flight-pool
+    schedules:
+      - cron: "*/2 * * * *" # To be changed to every minute later
+        timezone: UTC
+
+  - name: airport-data-refresh
+    entrypoint: flows/airports_extract.py:airports_extract_flow
+    description: "Refreshes airport data from the source every day"
+    work_pool:
+      name: flight-pool
+    schedules:
+      - cron: "0 0 * * *"
+        timezone: UTC
+
+  # --- Data Maintenance Flows ---
+
+  - name: daily-retention-cleanup
+    entrypoint: flows/db_maintain.py:db_maintenance_flow
+    description: "Enforces retention policy on all partitioned tables daily"
+    work_pool:
+      name: NOAA-pool
+    schedules:
+      - cron: "0 0 * * *"
+        timezone: UTC
+
+  # --- Reference Data Flows ---
+
+  - name: transmission-lines-ingest
+    entrypoint: flows/transmission_lines_extract.py:transmission_lines_extract_flow
+    description: "One-time ingestion of electric transmission lines from local CSV into PostGIS"
+    work_pool:
+      name: NOAA-pool

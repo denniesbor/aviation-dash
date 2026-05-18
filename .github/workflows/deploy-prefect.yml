@@ -1,0 +1,137 @@
+name: Prefect Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY to confirm Prefect redeploy'
+        required: true
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose.yaml'
+
+jobs:
+  check-compose:
+    name: Check if compose changes affect Prefect
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      service_affected: ${{ steps.check.outputs.service_affected }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - name: Detect change type
+        id: check
+        run: |
+          git show HEAD~1:docker-compose.yaml > /tmp/old-compose.yaml
+          AFFECTED=false
+          for SVC in prefect-server prefect-init prefect-worker-noaa prefect-worker-flight; do
+            OLD=$(awk -v s="  ${SVC}:" '$0==s{f=1; print; next} f && /^  [^ ]/{exit} f{print}' /tmp/old-compose.yaml)
+            NEW=$(awk -v s="  ${SVC}:" '$0==s{f=1; print; next} f && /^  [^ ]/{exit} f{print}' docker-compose.yaml)
+            if [ "$OLD" != "$NEW" ]; then
+              AFFECTED=true
+              break
+            fi
+          done
+          rm -f /tmp/old-compose.yaml
+
+          echo "service_affected=$AFFECTED" >> "$GITHUB_OUTPUT"
+
+  guard:
+    name: Confirm Intent
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        if: inputs.confirm != 'DEPLOY'
+        run: |
+          echo "Confirmation not provided. Aborting."
+          exit 1
+
+  test-static:
+    name: Folder Structure & Coverage Enforcement
+    needs: guard
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install pytest dotenv
+      - run: pytest tests/test_folder_structure.py
+      - run: pytest tests/test_coverage_enforcement.py -v
+
+  test-flows:
+    name: Run Flows Tests
+    needs: test-static
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: timescale/timescaledb-ha:pg18
+        env:
+          POSTGRES_USER: prefect
+          POSTGRES_PASSWORD: prefect
+          POSTGRES_DB: prefect
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: docker/flows_package/requirements.txt
+      - name: Install Flows Dependencies
+        run: pip install -r docker/flows_package/requirements.txt
+      - name: Run init.sh
+        run: |
+          chmod +x ./docker/db-init-scripts/init.sh
+          ./docker/db-init-scripts/init.sh
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGPASSWORD: prefect
+          POSTGRES_USER: prefect
+          POSTGRES_DB: prefect
+          DEVELOPER_DB: app
+          DEVELOPER_USER: developer
+          DEVELOPER_PASSWORD: ${{ secrets.DEVELOPER_PASSWORD }}
+          READONLY_PASSWORD: ${{ secrets.READONLY_PASSWORD }}
+      - name: Run db_maintain.py
+        run: python prefect_workflows/flows/db_maintain.py
+        env:
+          PYTHONPATH: "prefect_workflows:."
+          DATABASE_URL: postgresql://developer:${{ secrets.DEVELOPER_PASSWORD }}@localhost:5432/app
+      - name: Execute Flows Tests
+        run: pytest tests/test_flows/ -v
+        env:
+          PYTHONPATH: "."
+          DEVELOPER_USER: developer
+          DEVELOPER_PASSWORD: ${{ secrets.DEVELOPER_PASSWORD }}
+          DEVELOPER_DB: app
+          PGHOST: localhost
+          PGPORT: "5432"
+
+  deploy-prefect:
+    name: Deploy Prefect to VM
+    needs: [check-compose, guard, test-static, test-flows]
+    if: |
+      always() &&
+      !cancelled() &&
+      ((github.event_name == 'workflow_dispatch' && needs.test-static.result == 'success' && needs.test-flows.result == 'success') ||
+       (github.event_name == 'push' && needs.check-compose.outputs.service_affected == 'true'))
+    uses: ./.github/workflows/deploy.yml
+    with:
+      services: prefect
+    secrets: inherit

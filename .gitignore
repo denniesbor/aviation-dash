@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+*.pyc
+*.claude
+
+# Prefect
+.prefect/
+.prefectignore
+
+# Environment variables
+.env*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Database
+*.db
+*.sqlite3
+postgres_data/
+redis_data/
+
+# Docker
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+secrets/pyopensky-settings
+secrets/users.yml
+Running
+
+# uv
+uv.lock
+.python-version
+*ipynb
+notebooks/
+bin/
+.github/workflows/.secretsbin/act
+
+# frontend/src/dummy_data/
+frontend/src/dummy_data/
+src/api/core.*
+
+# Agent context files
+CLAUDE.md
+AGENTS.md
+CONTEXT.md
+HANDOFF.md
+
+# Secrets, never commit
+secrets/
+.env
+.env.local
+*.env.local
+frontend/.env
+
+# Runtime
+logs/
+*.log
+data/
+
+# Backups and cruft
+*.bak
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pixi/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Docker volumes
+.postgres-data/
+pgdata/

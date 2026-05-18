@@ -1,0 +1,126 @@
+name: API CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/api/**'
+      - 'src/**'
+      - 'docker-compose.yaml'
+      - 'tests/test_api_responses/**' 
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/api/**'
+      - 'src/**'
+      - 'docker-compose.yaml'
+
+jobs:
+  check-compose:
+    name: Check if compose changes affect API
+    runs-on: ubuntu-latest
+    outputs:
+      compose_only: ${{ steps.check.outputs.compose_only }}
+      service_affected: ${{ steps.check.outputs.service_affected }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - name: Detect change type
+        id: check
+        run: |
+          # Check if any non-compose files changed
+          NON_COMPOSE=$(git diff --name-only HEAD~1 -- 'docker/api/' 'src/' | head -1)
+          if [ -n "$NON_COMPOSE" ]; then
+            echo "compose_only=false" >> "$GITHUB_OUTPUT"
+            echo "service_affected=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Compose-only change — compare the fastapi service block between commits
+          git show HEAD~1:docker-compose.yaml > /tmp/old-compose.yaml
+          OLD=$(awk '/^  fastapi:/{found=1; print; next} found && /^  [^ ]/{exit} found{print}' /tmp/old-compose.yaml)
+          NEW=$(awk '/^  fastapi:/{found=1; print; next} found && /^  [^ ]/{exit} found{print}' docker-compose.yaml)
+          rm -f /tmp/old-compose.yaml
+
+          if [ "$OLD" != "$NEW" ]; then
+            echo "compose_only=true" >> "$GITHUB_OUTPUT"
+            echo "service_affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "compose_only=true" >> "$GITHUB_OUTPUT"
+            echo "service_affected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-static:
+    name: Folder Structure & Coverage Enforcement
+    needs: check-compose
+    if: needs.check-compose.outputs.compose_only == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install pytest dotenv
+      - run: pytest tests/test_folder_structure.py
+      - run: pytest tests/test_coverage_enforcement.py -v
+
+  test-api:
+    name: Run API Tests
+    needs: [check-compose, test-static]
+    if: needs.check-compose.outputs.compose_only == 'false'
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: timescale/timescaledb-ha:pg18
+        env:
+          POSTGRES_USER: prefect
+          POSTGRES_PASSWORD: prefect
+          POSTGRES_DB: prefect
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: docker/api/requirements.txt
+      - name: Install API Dependencies
+        run: pip install -r docker/api/requirements.txt
+      - name: Run init.sh
+        run: |
+          chmod +x ./docker/db-init-scripts/init.sh
+          ./docker/db-init-scripts/init.sh
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGPASSWORD: prefect
+          POSTGRES_USER: prefect
+          POSTGRES_DB: prefect
+          DEVELOPER_DB: app
+          DEVELOPER_USER: developer
+          DEVELOPER_PASSWORD: ${{ secrets.DEVELOPER_PASSWORD }}
+          READONLY_PASSWORD: ${{ secrets.READONLY_PASSWORD }}
+      - name: Execute API Tests
+        run: pytest tests/test_api_responses/ -v
+        env:
+          PYTHONPATH: "."
+
+  deploy-api:
+    name: Deploy API to VM
+    needs: [check-compose, test-static, test-api]
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.check-compose.outputs.service_affected == 'true' &&
+      (needs.check-compose.outputs.compose_only == 'true' || (needs.test-static.result == 'success' && needs.test-api.result == 'success'))
+    uses: ./.github/workflows/deploy.yml
+    with:
+      services: api
+    secrets: inherit

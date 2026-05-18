@@ -1,0 +1,87 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  font-family: "Roboto", system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: "Roboto", system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+:root {
+  --ui-bg: rgba(255, 255, 255, 1);
+  --ui-text: #000000;
+  --ui-border: #cccccc;
+  --ui-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  --ui-purple-foreground: #1976d2;
+}
+
+.dark {
+  --ui-bg: #181a1b;
+  --ui-text: #f7f7fa;
+  --ui-border: #333333;
+  --ui-shadow: 0 4px 12px #111;
+  --ui-purple-foreground: #a78bfa; 
+}
+.App {
+  width: 100vw;
+  min-height: 100vh;
+  overflow-y: auto;
+}
+
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  z-index: 1;
+}
+
+.custom-plane-icon {
+  background: transparent;
+  border: none;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 8px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.4);
+}
+
+.leaflet-popup-content {
+  margin: 0;
+}
+
+.leaflet-control-attribution a {
+  color: #0078a8;
+}
+
+.leaflet-marker-icon {
+  transition: transform 0.3s ease-out;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: "transparent";
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ui-purple-foreground);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}

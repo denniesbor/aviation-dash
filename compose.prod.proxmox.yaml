@@ -1,0 +1,10 @@
+# Production overrides for Proxmox.
+# All port values come from .env (FASTAPI_HOST, etc).
+# Only services to disable and one tweak for dozzle.
+
+services:
+  nginx:
+    profiles: ["disabled"]
+
+  frontend:
+    profiles: ["disabled"]

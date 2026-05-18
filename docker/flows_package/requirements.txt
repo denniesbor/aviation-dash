@@ -1,0 +1,10 @@
+requests
+asyncpg
+pandas
+pyopensky
+numpy
+pytest
+pytest-asyncio
+prefect
+redis
+pyquery

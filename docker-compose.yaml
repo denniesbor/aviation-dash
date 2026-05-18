@@ -1,0 +1,306 @@
+services:
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    restart: always
+    ports:
+      - "${NGINX_HOST:-0.0.0.0}:${NGINX_HOST_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - prefect-server
+      - fastapi
+      - frontend
+      - pgadmin
+    networks:
+      - web_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    restart: always
+    networks:
+      - web_network
+    depends_on:
+      - fastapi
+
+  postgis:
+    image: timescale/timescaledb-ha:pg18
+    container_name: postgis
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command: >
+      postgres
+      -c max_connections=150
+      -c shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      -c work_mem=${PG_WORK_MEM:-4MB}
+      -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-512MB}
+      -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-64MB}
+      -c wal_buffers=${PG_WAL_BUFFERS:-7864kB}
+      -c checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION_TARGET:-0.9}
+    environment:
+      - POSTGRES_USER=prefect
+      - POSTGRES_PASSWORD=prefect
+      - POSTGRES_DB=prefect
+      - DEVELOPER_DB=${DEVELOPER_DB}
+      - DEVELOPER_USER=${DEVELOPER_USER}
+      - DEVELOPER_PASSWORD=${DEVELOPER_PASSWORD}
+      - READONLY_PASSWORD=${READONLY_PASSWORD}
+    volumes:
+      - timescale_data:/home/postgres/pgdata/data
+      - ./docker/db-init-scripts/init.sh:/docker-entrypoint-initdb.d/init.sh
+    ports:
+      - "${POSTGIS_HOST:-127.0.0.1}:${POSTGIS_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect -h 127.0.0.1 -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    networks:
+      - postgis_external
+      - data_network
+
+  pgadmin:
+    image: dpage/pgadmin4:9.14.0
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-mypassword}
+    ports:
+      - "${PGADMIN_HOST:-127.0.0.1}:${PGADMIN_HOST_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgis
+    restart: unless-stopped
+    networks:
+      - data_network
+      - web_network
+
+  redis:
+    image: redis:7
+    container_name: redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prefect_network
+      - data_network
+
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    container_name: prefect-server
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: ${DATABASE_URL}
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+      PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-/prefect/api}
+      PREFECT_UI_SERVE_BASE: ${PREFECT_UI_SERVE_BASE:-/prefect}
+      PREFECT_API_SERVICES_SCHEDULER_MAX_CATCHUP_SECONDS: "60"
+    command: prefect server start --host 0.0.0.0
+    ports:
+      - "${PREFECT_HOST:-127.0.0.1}:${PREFECT_HOST_PORT:-4200}:4200"
+    volumes:
+      - prefect_home:/root/.prefect
+    networks:
+      - web_network
+      - prefect_network
+      - data_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:4200/api/health', timeout=1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  prefect-init:
+    container_name: prefect-init
+    build:
+      context: .
+      dockerfile: docker/flows_package/Dockerfile
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      postgis:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql://developer:${DEVELOPER_PASSWORD}@postgis:5432/app
+      DEVELOPER_USER: ${DEVELOPER_USER:-developer}
+      DEVELOPER_PASSWORD: ${DEVELOPER_PASSWORD:-zxc123}
+      DEVELOPER_DB: ${DEVELOPER_DB:-app}
+      PYTHONPATH: /opt/prefect-app:/opt
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        cd /opt/prefect-app
+
+        prefect work-pool create NOAA-pool --type process --overwrite
+        prefect work-pool create flight-pool --type process --overwrite
+
+        prefect deploy --all
+
+        prefect deployment run "initialize-db-flow/db_initial"
+    volumes:
+      - ./prefect_workflows:/opt/prefect-app
+      - ./shared:/opt/shared
+    networks:
+      - prefect_network
+      - data_network
+    restart: "no"
+
+  prefect-worker-noaa:
+    container_name: prefect-worker-noaa
+    build:
+      context: .
+      dockerfile: docker/flows_package/Dockerfile
+    depends_on:
+      prefect-init:
+        condition: service_completed_successfully
+      prefect-server:
+        condition: service_healthy
+      postgis:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql://developer:${DEVELOPER_PASSWORD}@postgis:5432/app
+      DEVELOPER_USER: ${DEVELOPER_USER:-developer}
+      DEVELOPER_PASSWORD: ${DEVELOPER_PASSWORD:-zxc123}
+      DEVELOPER_DB: ${DEVELOPER_DB:-app}
+      PYTHONPATH: /opt/prefect-app:/opt
+      RETENTION_DAYS_FLIGHT_STATES: ${RETENTION_DAYS_FLIGHT_STATES:-365}
+      RETENTION_DAYS_DRAP_REGION: ${RETENTION_DAYS_DRAP_REGION:-365}
+      RETENTION_DAYS_AURORA_FORECAST: ${RETENTION_DAYS_AURORA_FORECAST:-365}
+      RETENTION_DAYS_GEOELECTRIC_FIELD: ${RETENTION_DAYS_GEOELECTRIC_FIELD:-365}
+      RETENTION_DAYS_GOES_XRAY_6HOUR: ${RETENTION_DAYS_GOES_XRAY_6HOUR:-1825}
+      RETENTION_DAYS_GOES_PROTON_FLUX: ${RETENTION_DAYS_GOES_PROTON_FLUX:-1825}
+      RETENTION_DAYS_KP_INDEX: ${RETENTION_DAYS_KP_INDEX:-1825}
+    command:
+      - bash
+      - -c
+      - |
+        cd /opt/prefect-app
+        prefect worker start --pool NOAA-pool --name noaa-worker
+    restart: unless-stopped
+    volumes:
+      - ./prefect_workflows:/opt/prefect-app
+      - ./shared:/opt/shared
+      - ./data:/opt/data:ro
+      - ${PYOPENSKY_SETTINGS:-/dev/null}:/root/.config/pyopensky/settings.conf
+    networks:
+      - prefect_network
+      - data_network
+
+  prefect-worker-flight:
+    container_name: prefect-worker-flight
+    build:
+      context: .
+      dockerfile: docker/flows_package/Dockerfile
+    depends_on:
+      prefect-init:
+        condition: service_completed_successfully
+      prefect-server:
+        condition: service_healthy
+      postgis:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql://developer:${DEVELOPER_PASSWORD}@postgis:5432/app
+      DEVELOPER_USER: ${DEVELOPER_USER:-developer}
+      DEVELOPER_PASSWORD: ${DEVELOPER_PASSWORD:-zxc123}
+      DEVELOPER_DB: ${DEVELOPER_DB:-app}
+      PYTHONPATH: /opt/prefect-app:/opt
+    command:
+      - bash
+      - -c
+      - |
+        cd /opt/prefect-app
+        prefect worker start --pool flight-pool --name flight-worker
+    restart: unless-stopped
+    volumes:
+      - ./prefect_workflows:/opt/prefect-app
+      - ./shared:/opt/shared
+      - ${PYOPENSKY_SETTINGS:-/dev/null}:/root/.config/pyopensky/settings.conf
+    networks:
+      - prefect_network
+      - data_network
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: unless-stopped
+    environment:
+      DOZZLE_AUTH_PROVIDER: ${DOZZLE_AUTH_PROVIDER:-simple}
+      DOZZLE_BASE: ${DOZZLE_BASE:-/dozzle}
+      DOZZLE_HOSTNAME: ${DOZZLE_HOSTNAME:-}
+    ports:
+      - "${DOZZLE_HOST:-127.0.0.1}:${DOZZLE_HOST_PORT:-8095}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./secrets/users.yml:/data/users.yml:ro
+    networks:
+      - web_network
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: fastapi
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      DEVELOPER_USER: ${DEVELOPER_USER:-developer}
+      DEVELOPER_PASSWORD: ${DEVELOPER_PASSWORD:-zxc123}
+      DEVELOPER_DB: ${DEVELOPER_DB:-app}
+      PYTHONPATH: /app
+    ports:
+      - "${FASTAPI_HOST:-127.0.0.1}:${FASTAPI_HOST_PORT:-8000}:8000"
+    restart: unless-stopped
+    volumes:
+      - ./src/api:/app
+      - ./shared:/app/shared
+    networks:
+      - web_network
+      - data_network
+
+volumes:
+  prefect_home:
+    driver: local
+  timescale_data:
+    driver: local
+  redis_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+networks:
+  web_network:
+    driver: bridge
+  prefect_network:
+    driver: bridge
+  data_network:
+    driver: bridge
+    internal: true
+  postgis_external:
+    driver: bridge
